@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import Pusher from "pusher-js";
 import { 
   HeartPulse, 
   Activity, 
@@ -314,29 +315,57 @@ export default function App() {
     fetch("/api/admin/siren/stop", { method: "POST" }).catch(() => {});
   };
 
-  // Poll for global siren status
+  // Subscribe to Pusher for global siren status
   useEffect(() => {
-    const pollSirenStatus = async () => {
-      try {
-        const res = await fetch("/api/siren-status");
-        if (res.ok) {
-          const data = await res.json();
-          if (data.active && !isSirenActive) {
-            triggerStrongSiren();
-          } else if (!data.active && isSirenActive) {
-            // Only auto-stop if server says false, handled gracefully
-            setIsSirenActive(false);
-            if (sirenIntervalRef.current) {
-              clearInterval(sirenIntervalRef.current);
-              sirenIntervalRef.current = null;
+    const key = import.meta.env.VITE_PUSHER_KEY;
+    const cluster = import.meta.env.VITE_PUSHER_CLUSTER;
+
+    if (key && key !== "YOUR_PUSHER_KEY") {
+      const pusher = new Pusher(key, {
+        cluster: cluster || "eu"
+      });
+
+      const channel = pusher.subscribe("bedsore-guardian");
+      channel.bind("siren-state", function(data: { active: boolean }) {
+        if (data.active && !isSirenActive) {
+          triggerStrongSiren();
+        } else if (!data.active && isSirenActive) {
+          stopSirenUIOnly(); // safe internal function to clear UI without fetching
+        }
+      });
+
+      return () => {
+        channel.unbind_all();
+        channel.unsubscribe();
+        pusher.disconnect();
+      };
+    } else {
+      // Fallback polling if Pusher is not configured
+      const pollSirenStatus = async () => {
+        try {
+          const res = await fetch("/api/siren-status");
+          if (res.ok) {
+            const data = await res.json();
+            if (data.active && !isSirenActive) {
+              triggerStrongSiren();
+            } else if (!data.active && isSirenActive) {
+              stopSirenUIOnly();
             }
           }
-        }
-      } catch (e) {}
-    };
-    const sInt = setInterval(pollSirenStatus, 3000);
-    return () => clearInterval(sInt);
+        } catch (e) {}
+      };
+      const sInt = setInterval(pollSirenStatus, 3000);
+      return () => clearInterval(sInt);
+    }
   }, [isSirenActive, notificationsEnabled]);
+
+  const stopSirenUIOnly = () => {
+    setIsSirenActive(false);
+    if (sirenIntervalRef.current) {
+      clearInterval(sirenIntervalRef.current);
+      sirenIntervalRef.current = null;
+    }
+  };
 
   useEffect(() => {
     localStorage.setItem("bs_audio_enabled", JSON.stringify(notificationsEnabled));

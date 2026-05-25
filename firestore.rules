@@ -24,6 +24,13 @@ service cloud.firestore {
              data.get('clinicalText', '') is string;
     }
 
+    function isValidSirenState(data) {
+      return data.keys().hasAll(['active', 'updatedAt']) &&
+             data.keys().size() == 2 &&
+             data.active is bool &&
+             data.updatedAt == request.time;
+    }
+
     match /clinical_logs/{logId} {
       // User can read their own logs
       allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
@@ -34,6 +41,19 @@ service cloud.firestore {
       
       // We don't allow updating or deleting clinical logs to keep them as immutable audit trails
       allow update, delete: if false;
+    }
+
+    match /system/{docId} {
+      // Allow any signed in user to read system status (like siren)
+      allow get: if isSignedIn() && isValidId(docId);
+      allow list: if isSignedIn();
+      
+      // Allow any signed in user to toggle the siren
+      allow create: if isSignedIn() && isValidId(docId) && isValidSirenState(incoming());
+      allow update: if isSignedIn() && isValidId(docId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['active', 'updatedAt']) &&
+        incoming().updatedAt == request.time &&
+        incoming().active is bool;
     }
   }
 }

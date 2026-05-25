@@ -4,8 +4,18 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import webpush from "web-push";
+import Pusher from "pusher";
 
 dotenv.config();
+
+// Pusher Setup
+const pusher = new Pusher({
+  appId: process.env.PUSHER_APP_ID || "mock_id",
+  key: process.env.PUSHER_KEY || "mock_key",
+  secret: process.env.PUSHER_SECRET || "mock_secret",
+  cluster: process.env.PUSHER_CLUSTER || "eu",
+  useTLS: true
+});
 
 // Web Push Setup
 const publicVapidKey = "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLcg05SR1oE8";
@@ -33,6 +43,7 @@ let globalSirenActive = false;
 
 app.post("/api/admin/siren", (req, res) => {
   globalSirenActive = true;
+  pusher.trigger("bedsore-guardian", "siren-state", { active: true }).catch(console.error);
   // Send push notification to all subscribers
   const payload = {
     title: "🚨 إنذار عاجل للممرضين",
@@ -47,6 +58,7 @@ app.post("/api/admin/siren", (req, res) => {
 
 app.post("/api/admin/siren/stop", (req, res) => {
   globalSirenActive = false;
+  pusher.trigger("bedsore-guardian", "siren-state", { active: false }).catch(console.error);
   res.json({ success: true });
 });
 
