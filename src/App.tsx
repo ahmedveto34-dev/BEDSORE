@@ -34,9 +34,11 @@ import {
   BellOff,
   Settings,
   AudioLines,
-  Edit3
+  Edit3,
+  Play
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend } from "recharts";
+import QRCode from "react-qr-code";
 import { INITIAL_PATIENTS, INITIAL_LOGS, ARABIC_SAMPLE_LOGS } from "./data";
 import { Patient, TurnLog, AnalysisResponse, BradenScore } from "./types";
 
@@ -46,13 +48,96 @@ import type { User as FirebaseUser } from "firebase/auth";
 
 import { translations } from "./i18n";
 
+const TurningClock = ({ nextTurningDateStr, lang, t }: { nextTurningDateStr?: string, lang: 'ar'|'en', t: any }) => {
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+  const seconds = now.getSeconds();
+
+  const hDeg = (hours % 12) * 30 + minutes * 0.5;
+  const mDeg = minutes * 6 + seconds * 0.1;
+  const sDeg = seconds * 6;
+
+  let nextHour: number | null = null;
+  if (nextTurningDateStr) {
+     const nextDate = new Date(nextTurningDateStr);
+     nextHour = nextDate.getHours();
+  }
+
+  return (
+    <div className="flex flex-col items-center bg-white p-6 rounded-xl border border-slate-200 shadow-sm mb-6 relative overflow-hidden">
+      <div className="absolute top-0 w-full h-1 bg-gradient-to-r from-indigo-500 to-rose-500"></div>
+      <h3 className="text-slate-800 font-bold mb-4 font-arabic text-lg flex items-center gap-2">
+        <Clock size={18} className="text-indigo-600" />
+        {t.clockTitle}
+      </h3>
+      
+      <div className="relative w-40 h-40 rounded-full border-8 border-slate-100 flex items-center justify-center shadow-inner mb-4 bg-slate-50">
+        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map(i => {
+           const isTurningHour = i % 2 !== 0; // 1, 3, 5, 7, 9, 11 (Odd hours on 12-hour clock face)
+           const isTwoHour = i % 2 === 0;
+
+           return (
+            <div key={i} className="absolute w-full h-full pointer-events-none" style={{ transform: `rotate(${i * 30}deg)` }}>
+              <div 
+                className={`mx-auto ${isTurningHour ? 'bg-rose-500 w-2 h-4 rounded-b-md shadow-sm' : (isTwoHour ? 'w-1.5 h-3 bg-slate-400' : 'w-1 h-2 bg-slate-300')} transition-all`}
+              ></div>
+            </div>
+          )})}
+        
+        <div className="absolute w-1.5 bg-slate-800 rounded-full shadow-sm" style={{ height: '35%', bottom: '50%', transformOrigin: 'bottom center', transform: `rotate(${hDeg}deg)` }}></div>
+        <div className="absolute w-1 bg-slate-600 rounded-full shadow-sm" style={{ height: '45%', bottom: '50%', transformOrigin: 'bottom center', transform: `rotate(${mDeg}deg)` }}></div>
+        <div className="absolute w-0.5 bg-rose-500 rounded-full shadow-sm" style={{ height: '48%', bottom: '50%', transformOrigin: 'bottom center', transform: `rotate(${sDeg}deg)` }}></div>
+        
+        <div className="absolute w-4 h-4 bg-slate-800 rounded-full border-4 border-rose-500 shadow-md"></div>
+      </div>
+      
+      <div className="font-mono text-2xl font-bold text-slate-800 tracking-wider">
+        {now.toLocaleTimeString(lang === "ar" ? "ar-SA" : "en-US")}
+      </div>
+      <div className="text-[11px] font-bold text-indigo-600 mt-2 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100">
+        {t.turningCycle}
+      </div>
+    </div>
+  );
+};
+
 export default function App() {
-  const [lang, setLang] = useState<"ar" | "en">("ar");
+  const [lang, setLang] = useState<"ar" | "en">(() => {
+    return (localStorage.getItem("bs_lang") as "ar" | "en") || "ar";
+  });
+  
+  useEffect(() => {
+    localStorage.setItem("bs_lang", lang);
+  }, [lang]);
   const t = translations[lang];
 
-  const [patients, setPatients] = useState<Patient[]>(INITIAL_PATIENTS);
+  // Persistent States
+  const [patients, setPatients] = useState<Patient[]>(() => {
+    const saved = localStorage.getItem("bs_patients");
+    return saved ? JSON.parse(saved) : INITIAL_PATIENTS;
+  });
+  
+  useEffect(() => {
+    localStorage.setItem("bs_patients", JSON.stringify(patients));
+  }, [patients]);
+
   const [selectedPatientId, setSelectedPatientId] = useState<string>("p1");
-  const [logs, setLogs] = useState<TurnLog[]>(INITIAL_LOGS);
+  
+  const [logs, setLogs] = useState<TurnLog[]>(() => {
+    const saved = localStorage.getItem("bs_logs");
+    return saved ? JSON.parse(saved) : INITIAL_LOGS;
+  });
+  
+  useEffect(() => {
+    localStorage.setItem("bs_logs", JSON.stringify(logs));
+  }, [logs]);
   
   // Custom input state
   const [clinicalText, setClinicalText] = useState<string>(INITIAL_PATIENTS[0].lastClinicalText);
@@ -106,15 +191,41 @@ export default function App() {
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
   const [adminPasscode, setAdminPasscode] = useState("");
   const [adminError, setAdminError] = useState("");
-  const [adminTab, setAdminTab] = useState<"settings" | "patients">("settings");
+  const [adminTab, setAdminTab] = useState<"settings" | "patients" | "message">("settings");
   const [editingPatientId, setEditingPatientId] = useState<string | null>(null);
   const [editPatientData, setEditPatientData] = useState<Partial<Patient>>({});
+  
+  // Announcements
+  const [adminMessageText, setAdminMessageText] = useState("");
+  const [activeAnnouncement, setActiveAnnouncement] = useState<{ id: string, text: string } | null>(null);
+  const [lastAnnouncement, setLastAnnouncement] = useState<{ id: string, text: string } | null>(() => {
+    const saved = localStorage.getItem("bs_admin_announcement");
+    return saved ? JSON.parse(saved) : null;
+  });
+
+  // Audio Settings State
+  const [selectedTone, setSelectedTone] = useState<"default" | "alert" | "soft" | "custom">(() => {
+    return (localStorage.getItem("bs_selected_tone") as any) || "default";
+  });
+  
+  useEffect(() => {
+    localStorage.setItem("bs_selected_tone", selectedTone);
+  }, [selectedTone]);
+  const [customAudioUrl, setCustomAudioUrl] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load patient details on select
   const currentPatient = patients.find(p => p.id === selectedPatientId) || patients[0];
 
   // Notifications State
-  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    const saved = localStorage.getItem("bs_audio_enabled");
+    return saved ? JSON.parse(saved) : false;
+  });
+  
+  useEffect(() => {
+    localStorage.setItem("bs_audio_enabled", JSON.stringify(notificationsEnabled));
+  }, [notificationsEnabled]);
   const lastNotifiedRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -160,6 +271,53 @@ export default function App() {
       }
     }
   }, [timeLeftStr, notificationsEnabled, currentPatient]);
+
+  // Periodic check for mandatory turning hours (1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23)
+  useEffect(() => {
+    if (!notificationsEnabled) return;
+    
+    const checkSchedule = () => {
+      const now = new Date();
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+      
+      const isTargetHourContext = currentHour % 2 !== 0; // 1, 3, 5...
+      const nextHourIsOdd = (currentHour + 1) % 2 !== 0; // if current is 0, 2, 4
+      
+      // Alert 10 minutes before the odd hour
+      if (nextHourIsOdd && currentMinute === 50) {
+        const notifKey = `pre-alert-${now.toDateString()}-${currentHour}`;
+        if (lastNotifiedRef.current !== notifKey) {
+          lastNotifiedRef.current = notifKey;
+          
+          if (Notification.permission === "granted") {
+            new Notification(`تنبيه: اقترب موعد التقليب الافتراضي!`, {
+              body: `بقي 10 دقائق لموعد التقليب القادم (الساعة ${currentHour + 1}:00). الرجاء الاستعداد.`
+            });
+            try { playTestAudio(); } catch(e) {}
+          }
+        }
+      }
+      
+      // Alert exactly on the odd hour
+      if (isTargetHourContext && currentMinute === 0) {
+        const notifKey = `alert-${now.toDateString()}-${currentHour}`;
+        if (lastNotifiedRef.current !== notifKey) {
+          lastNotifiedRef.current = notifKey;
+          
+          if (Notification.permission === "granted") {
+            new Notification(`تنبيه عاجل: موعد التقليب الآني!`, {
+              body: `الساعة الآن ${currentHour}:00. حان الوقت لإجراء التقليب الإلزامي لجميع المرضى المدرجين بالجدول.`
+            });
+            try { playTestAudio(); } catch(e) {}
+          }
+        }
+      }
+    };
+    
+    const interval = setInterval(checkSchedule, 30000); // Check every 30 seconds
+    return () => clearInterval(interval);
+  }, [notificationsEnabled]);
 
   useEffect(() => {
     const unsubscribe = initAuth(
@@ -285,11 +443,122 @@ export default function App() {
     }
   };
 
+  // Handle Admin Announcements
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "bs_admin_announcement" && e.newValue) {
+        try {
+          const data = JSON.parse(e.newValue);
+          triggerAnnouncement(data);
+        } catch (err) {}
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [lang]);
+
+  const triggerAnnouncement = (data: { id: string, text: string }) => {
+    setActiveAnnouncement(data);
+    setLastAnnouncement(data);
+    // Play Notification Sound & TTS
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+      osc.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+      osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.1);
+      gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.5);
+      
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(data.text);
+        utterance.lang = lang === "ar" ? "ar-SA" : "en-US";
+        window.speechSynthesis.speak(utterance);
+      }
+    } catch (e) {}
+
+    setTimeout(() => setActiveAnnouncement(null), 15000); // 15 seconds auto dismiss
+  };
+
+  const sendAdminAnnouncement = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminMessageText.trim()) return;
+    const data = { id: Date.now().toString(), text: adminMessageText };
+    localStorage.setItem("bs_admin_announcement", JSON.stringify(data));
+    triggerAnnouncement(data);
+    setAdminMessageText("");
+  };
+
   const handleAdminLogout = () => {
     setIsAdminLoggedIn(false);
     setShowAdminView(false);
     setAdminTab("settings");
     setEditingPatientId(null);
+  };
+
+  const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setCustomAudioUrl(url);
+      setSelectedTone("custom");
+    }
+  };
+
+  const playTestAudio = () => {
+    if (!notificationsEnabled) return;
+    try {
+      if (selectedTone === "custom" && customAudioUrl) {
+        const audio = new Audio(customAudioUrl);
+        audio.play().catch(e => console.error("Audio playback failed", e));
+      } else {
+        // Use Web Audio API for synthesized sounds to ensure cross-browser compatibility
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioContextClass) return;
+        
+        const ctx = new AudioContextClass();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        
+        if (selectedTone === "alert") {
+          osc.type = "square";
+          osc.frequency.setValueAtTime(400, ctx.currentTime);
+          osc.frequency.setValueAtTime(600, ctx.currentTime + 0.15);
+          osc.frequency.setValueAtTime(400, ctx.currentTime + 0.3);
+          osc.frequency.setValueAtTime(600, ctx.currentTime + 0.45);
+          gain.gain.setValueAtTime(0.5, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.6);
+          osc.start(ctx.currentTime);
+          osc.stop(ctx.currentTime + 0.6);
+        } else if (selectedTone === "soft") {
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(440, ctx.currentTime);
+          gain.gain.setValueAtTime(0, ctx.currentTime);
+          gain.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 0.1);
+          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 1.2);
+          osc.start(ctx.currentTime);
+          osc.stop(ctx.currentTime + 1.2);
+        } else { // default
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(800, ctx.currentTime);
+          osc.frequency.setValueAtTime(1200, ctx.currentTime + 0.1);
+          gain.gain.setValueAtTime(0.8, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+          osc.start(ctx.currentTime);
+          osc.stop(ctx.currentTime + 0.5);
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const startEditPatient = (p: Patient) => {
@@ -301,6 +570,48 @@ export default function App() {
     if (!editingPatientId) return;
     setPatients(prev => prev.map(p => p.id === editingPatientId ? { ...p, ...editPatientData } as Patient : p));
     setEditingPatientId(null);
+  };
+
+  const deletePatient = (id: string) => {
+    if (window.confirm(t.confirmDelete || "Are you sure?")) {
+      setPatients(prev => prev.filter(p => p.id !== id));
+      if (selectedPatientId === id) {
+        setSelectedPatientId(patients.find(p => p.id !== id)?.id || "p1");
+      }
+      setEditingPatientId(null);
+    }
+  };
+
+  const printQRCode = (qrValue: string) => {
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(`
+        <html>
+          <head>
+            <title>Print QR Code</title>
+            <style>
+              body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: sans-serif; text-align: center; }
+              .container { border: 2px solid #000; padding: 2rem; border-radius: 12px; }
+              img { width: 300px; height: 300px; }
+              h1 { margin-bottom: 0.5rem; }
+              p { font-size: 1.2rem; color: #555; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>Bed QR Code</h1>
+              <p>${qrValue}</p>
+              <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrValue)}" alt="QR Code" />
+              <p style="margin-top: 1rem; font-size: 0.9rem;">Scan this code at the bedside.</p>
+            </div>
+            <script>
+              window.onload = function() { window.print(); window.close(); }
+            </script>
+          </body>
+        </html>
+      `);
+      printWindow.document.close();
+    }
   };
 
   const cancelEditPatient = () => {
@@ -493,7 +804,7 @@ export default function App() {
       } catch (e) {}
 
       // Update scanner UI
-      setScanMessage(`✅ تم بنجاح التحقق والمطابقة الفيزيائية للرمز [${currentPatient.qrCodeValue}] بجوار سرير المريض! تم فك تعليق النشاط.`);
+      setScanMessage(`✅ تم مسح الكود بنجاح. الممرض المسئول: احمد وحيد قام بإتمام عملية التقليب وتوثيقها للسرير [${currentPatient.bedNo}].`);
       
       // Update patient status to VERIFIED
       setPatients(prev => prev.map(p => {
@@ -509,13 +820,13 @@ export default function App() {
 
       // Append verified log
       const newLog: TurnLog = {
-        id: `log_${Date.now()}`,
+        id: `logs_${Date.now()}`,
         patientId: currentPatient.id,
         patientName: currentPatient.name,
         bedNo: currentPatient.bedNo,
         timestamp: new Date().toISOString(),
         actionTaken: "تقليب مادي معتمد والتحقق من التواجد الفعلي عبر رمز QR السريري",
-        nurseNotes: `المطابقة اليدوية لرمز الاستجابة السريعة: ${currentPatient.qrCodeValue}. مستوى الخطورة المعتمد: ${currentPatient.riskLevelArabic || "شديدة"}. تم إلغاء أي مخالفة معلقة للتقليب.`,
+        nurseNotes: `المطابقة اليدوية لرمز الاستجابة السريعة: ${currentPatient.qrCodeValue}. مستوى الخطورة المعتمد: ${currentPatient.riskLevelArabic || "شديدة"}. تم التقليب بواسطة الممرض المسئول: احمد وحيد.`,
         bradenScoreText: `درجة برادن: ${currentPatient.bradenScore?.total || bradenSliders.total} (${currentPatient.riskLevelArabic || "مخاطر عالية"})`,
         isEscalated: false,
         verificationMethod: "QR_BEDSIDE_SCAN",
@@ -603,8 +914,8 @@ export default function App() {
       },
       riskLevel: "Low Risk",
       riskLevelArabic: "خطورة منخفضة (Low Risk)",
-      turningIntervalHours: 4.0,
-      nextTurningTime: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(),
+      turningIntervalHours: 3.0,
+      nextTurningTime: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
       isEscalated: false,
       qrCodeValue: `BEDS-${newPatientBed.replace(/\s+/g, '')}_NEW`,
       scanStatus: "PENDING_SCAN"
@@ -624,13 +935,13 @@ export default function App() {
   const applyManualBradenCalculation = () => {
     let riskL: "Severe Risk" | "High Risk" | "Moderate Risk" | "Low Risk" = "Low Risk";
     let riskAr = "خطورة منخفضة (Low Risk)";
-    let hours = 4.0;
+    let hours = 3.0;
 
     const score = bradenSliders.total;
     if (score <= 9) {
       riskL = "Severe Risk";
       riskAr = "خطورة بالغة جداً (Severe Risk)";
-      hours = 1.5;
+      hours = 1.0;
     } else if (score <= 12) {
       riskL = "High Risk";
       riskAr = "خطورة عالية (High Risk)";
@@ -638,11 +949,11 @@ export default function App() {
     } else if (score <= 14) {
       riskL = "Moderate Risk";
       riskAr = "خطورة متوسطة (Moderate Risk)";
-      hours = 3.0;
+      hours = 2.5;
     } else {
       riskL = "Low Risk";
       riskAr = "خطورة منخفضة (Low Risk)";
-      hours = 4.0;
+      hours = 3.0;
     }
 
     const overrideResponse: AnalysisResponse = {
@@ -716,7 +1027,7 @@ export default function App() {
           </div>
           <div className={`border-${lang === "ar" ? "l" : "r"} border-slate-700 px-2`}>
             <p className="text-slate-400 text-[10px] uppercase font-arabic mb-0.5">{t.nurseTitle}</p>
-            <p className="font-semibold text-teal-300 text-xs md:text-sm">د. سارة العتيبي (RN-772)</p>
+            <p className="font-semibold text-teal-300 text-xs md:text-sm">احمد وحيد (RN-772)</p>
           </div>
           <div className="border-r border-slate-700 pr-4 pl-2">
             <p className="text-slate-400 text-[10px] uppercase font-arabic mb-0.5">{t.wardTitle}</p>
@@ -756,6 +1067,25 @@ export default function App() {
           </div>
         </div>
       </header>
+      
+      {/* GLOBAL ANNOUNCEMENT BANNER */}
+      {activeAnnouncement && (
+        <div className="bg-gradient-to-r from-amber-200 to-amber-100 border-b border-amber-300 text-amber-900 px-6 py-4 flex items-center justify-between z-50 shadow-md">
+          <div className="flex items-center gap-4 flex-1">
+            <span className="relative flex h-4 w-4">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-4 w-4 bg-amber-500"></span>
+            </span>
+            <div className="flex flex-col">
+              <strong className="font-bold text-xs uppercase tracking-wider text-amber-700">{t.globalAnnouncement}</strong>
+              <span className="font-arabic font-bold text-lg">{activeAnnouncement.text}</span>
+            </div>
+          </div>
+          <button onClick={() => setActiveAnnouncement(null)} className="text-amber-700 hover:text-amber-900 bg-amber-300/30 hover:bg-amber-300/50 p-2 rounded-lg transition-colors cursor-pointer">
+            <X size={20} />
+          </button>
+        </div>
+      )}
 
       {showAdminView ? (
         <main className={`flex-1 p-8 flex flex-col items-center bg-slate-50 overflow-y-auto ${lang === "ar" ? "text-right" : "text-left"}`} dir={lang === "ar" ? "rtl" : "ltr"}>
@@ -811,16 +1141,49 @@ export default function App() {
                     <Users size={16} />
                     {t.patientsTab}
                   </button>
+                  <button 
+                    onClick={() => setAdminTab("message")}
+                    className={`flex-1 py-3 px-4 text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${adminTab === "message" ? "text-indigo-700 border-b-2 border-indigo-700 bg-white" : "text-slate-500 hover:text-slate-700"}`}
+                  >
+                    <Bell size={16} />
+                    {t.adminMessageTab}
+                  </button>
                 </div>
 
                 {/* Admin Content */}
                 <div className="flex-1 p-6 bg-white overflow-y-auto">
+                  {adminTab === "message" && (
+                    <div className="max-w-xl mx-auto space-y-6">
+                      <div className="p-6 border border-slate-200 rounded-xl bg-white shadow-sm flex flex-col gap-6">
+                        <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
+                          <Bell className="text-indigo-600" />
+                          {t.adminMessageTitle}
+                        </h3>
+                        <form onSubmit={sendAdminAnnouncement} className="space-y-4">
+                          <textarea
+                            value={adminMessageText}
+                            onChange={(e) => setAdminMessageText(e.target.value)}
+                            placeholder={t.adminMessagePlaceholder}
+                            rows={4}
+                            className={`w-full p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all text-lg resize-none ${lang === "ar" ? "font-arabic" : "font-sans"}`}
+                          />
+                          <button
+                            type="submit"
+                            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg shadow-md transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                          >
+                            <Play size={18} fill="currentColor" />
+                            {t.sendAdminMessageBtn}
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  )}
+
                   {adminTab === "settings" && (
                     <div className="max-w-xl mx-auto space-y-6">
                       <div className="p-4 border border-slate-200 rounded-lg flex items-center justify-between">
                         <div>
                           <h3 className="font-bold text-slate-800 text-sm mb-1">{t.enableAudio}</h3>
-                          <p className="text-xs text-slate-500">تفعيل/إلغاء التنبيهات الصوتية للتطبيقات والإشعارات المتأخرة.</p>
                         </div>
                         <label className="relative inline-flex items-center cursor-pointer">
                           <input 
@@ -832,6 +1195,72 @@ export default function App() {
                           <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
                         </label>
                       </div>
+
+                      {notificationsEnabled && (
+                        <div className="p-4 border border-slate-200 rounded-lg space-y-4">
+                          <h3 className="font-bold text-slate-800 text-sm">{t.audioToneLabel}</h3>
+                          <div className="grid grid-cols-2 gap-3">
+                            <button
+                              onClick={() => setSelectedTone("default")}
+                              className={`p-3 rounded-lg border text-xs font-bold transition-colors ${selectedTone === "default" ? "bg-indigo-50 border-indigo-500 text-indigo-700" : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"}`}
+                            >
+                              {t.toneDefault}
+                            </button>
+                            <button
+                              onClick={() => setSelectedTone("alert")}
+                              className={`p-3 rounded-lg border text-xs font-bold transition-colors ${selectedTone === "alert" ? "bg-indigo-50 border-indigo-500 text-indigo-700" : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"}`}
+                            >
+                              {t.toneAlert}
+                            </button>
+                            <button
+                              onClick={() => setSelectedTone("soft")}
+                              className={`p-3 rounded-lg border text-xs font-bold transition-colors ${selectedTone === "soft" ? "bg-indigo-50 border-indigo-500 text-indigo-700" : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"}`}
+                            >
+                              {t.toneSoft}
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (customAudioUrl) {
+                                  setSelectedTone("custom");
+                                } else {
+                                  fileInputRef.current?.click();
+                                }
+                              }}
+                              className={`p-3 rounded-lg border text-xs font-bold transition-colors relative flex items-center justify-center gap-2 ${selectedTone === "custom" ? "bg-indigo-50 border-indigo-500 text-indigo-700" : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"}`}
+                            >
+                              {t.customTone}
+                              {customAudioUrl && selectedTone !== "custom" && (
+                                <div className="absolute top-1 right-1 w-2 h-2 bg-indigo-500 rounded-full"></div>
+                              )}
+                            </button>
+                          </div>
+                          
+                          <div className="mt-4 flex flex-col items-center">
+                            <input 
+                              type="file" 
+                              ref={fileInputRef}
+                              accept="audio/mpeg, audio/wav, audio/*"
+                              className="hidden"
+                              onChange={handleAudioUpload}
+                            />
+                            <div className="flex gap-4 items-center mt-2">
+                              <button 
+                                onClick={() => fileInputRef.current?.click()}
+                                className="text-xs text-indigo-600 hover:text-indigo-800 underline font-semibold"
+                              >
+                                {t.uploadAudioHover}
+                              </button>
+                              <button
+                                onClick={playTestAudio}
+                                className="flex items-center gap-1.5 text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-800 px-3 py-1.5 rounded-full font-bold transition-colors"
+                              >
+                                <Play size={12} className="fill-current" />
+                                {t.testAudioBtn}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -876,12 +1305,25 @@ export default function App() {
                                     className="text-xs p-2 border border-slate-300 rounded w-20"
                                   />
                                 </div>
-                                <div className="flex gap-2 justify-end mt-2">
+                                <div className="flex gap-2 justify-end mt-2 border-b border-slate-100 pb-2">
+                                  <button onClick={() => deletePatient(p.id)} className="text-[10px] px-3 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-700 rounded font-bold cursor-pointer transition-colors ml-auto mr-auto">
+                                    {t.deletePatientBtn}
+                                  </button>
                                   <button onClick={cancelEditPatient} className="text-[10px] px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded font-bold cursor-pointer transition-colors">
                                     {t.cancelBtn}
                                   </button>
                                   <button onClick={savePatientEdit} className="text-[10px] px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-bold cursor-pointer transition-colors">
                                     {t.saveChanges}
+                                  </button>
+                                </div>
+                                <div className="flex flex-col items-center pt-2 gap-2">
+                                  <div className="bg-white p-2 border border-slate-200 rounded">
+                                    <QRCode value={p.qrCodeValue} size={80} />
+                                  </div>
+                                  <span className="text-[10px] text-slate-500 font-mono font-bold">{p.qrCodeValue}</span>
+                                  <button onClick={() => printQRCode(p.qrCodeValue)} className="text-[10px] px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded font-bold cursor-pointer transition-colors flex items-center gap-1 mt-1">
+                                    <QrCode size={12} />
+                                    {t.printQRBtn}
                                   </button>
                                 </div>
                               </div>
@@ -1270,6 +1712,18 @@ export default function App() {
 
           {/* Clinical input section: Formulate AI Log */}
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm flex flex-col print:hidden">
+            {lastAnnouncement && (
+              <div className="mb-4 bg-amber-50 border-l-4 border-amber-500 p-3 rounded text-amber-900 text-xs shadow-sm">
+                <span className="font-bold flex items-center justify-between mb-1">
+                  <span className="flex items-center gap-1.5"><Bell size={12} className="text-amber-600" /> {t.globalAnnouncement}</span>
+                  <span className="text-[9px] text-amber-600 font-mono">
+                    {new Date(parseInt(lastAnnouncement.id)).toLocaleTimeString(lang === "ar" ? "ar-SA" : "en-US")}
+                  </span>
+                </span>
+                <p className="font-bold text-sm tracking-wide font-arabic">{lastAnnouncement.text}</p>
+              </div>
+            )}
+            
             <h2 className="text-slate-900 text-sm font-black mb-3 flex items-center gap-2">
               <Sparkles className="text-teal-600 w-5 h-5 animate-spin-slow" />
               <span>{t.aiEvalTitle}</span>
@@ -1350,7 +1804,7 @@ export default function App() {
                   onClick={setAsViolationForce}
                   type="button"
                   className="bg-slate-100 hover:bg-rose-100 text-rose-700 border border-rose-200 px-3 py-2 rounded text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5"
-                  title="محاكاة تخطي الموعد كلياً لتسجيل حالة مخالفة"
+                  title="تسجيل تخطي الموعد كلياً واعتبارها حالة مخالفة"
                 >
                   <AlertOctagon size={14} />
                   <span>{t.simViolationBtn}</span>
@@ -1509,6 +1963,8 @@ export default function App() {
         {/* LEFT COLUMN: Compliance audits, logs, timeline and physical camera barcode simulator (Arabic Left) */}
         <aside className="col-span-12 lg:col-span-12 xl:col-span-3 flex flex-col gap-4 text-right order-3 print:hidden" dir="rtl">
           
+          <TurningClock nextTurningDateStr={currentPatient.nextTurningTime} lang={lang} t={t} />
+
           {/* Bedside QR Code Badge Showcase & Interaction */}
           <div className="bg-white rounded-lg border-2 border-slate-900 p-4 shadow-sm flex flex-col items-center">
             <span className="bg-slate-900 text-white text-[9px] font-bold px-3 py-0.5 rounded-full mb-2">
@@ -1585,7 +2041,7 @@ export default function App() {
               <div className="absolute top-1 right-1 bg-red-600 px-2 py-0.5 text-[8px] rounded uppercase tracking-wider font-mono animate-pulse">
                 LIVE SCANNER
               </div>
-              <p className="text-xs font-bold text-teal-400">كاميرا المسح المحاكاة بجوال الممرض:</p>
+              <p className="text-xs font-bold text-teal-400">واجهة الكاميرا بجوال الممرض:</p>
               
               {simulatedCameraFeed ? (
                 <div className="relative w-full h-32 bg-slate-950 rounded border border-slate-700 flex items-center justify-center overflow-hidden">
