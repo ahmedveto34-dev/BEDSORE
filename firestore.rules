@@ -1,0 +1,39 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false; // Default deny
+    }
+
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    function isValidClinicalLog(data) {
+      return data.keys().hasAll(['timestamp', 'patientName', 'ownerId', 'createdAt']) &&
+             data.timestamp is string &&
+             data.patientName is string &&
+             data.ownerId == request.auth.uid &&
+             data.createdAt == request.time &&
+             data.get('bedNo', '') is string &&
+             data.get('patientAge', '') is string &&
+             data.get('riskLevel', '') is string &&
+             (data.get('bradenTotal', 0) is number || data.get('bradenTotal', '') is string) &&
+             data.get('scanStatus', '') is string &&
+             data.get('clinicalText', '') is string;
+    }
+
+    match /clinical_logs/{logId} {
+      // User can read their own logs
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow get: if isSignedIn() && isValidId(logId) && resource.data.ownerId == request.auth.uid;
+      
+      // User can create new logs
+      allow create: if isSignedIn() && isValidId(logId) && isValidClinicalLog(incoming());
+      
+      // We don't allow updating or deleting clinical logs to keep them as immutable audit trails
+      allow update, delete: if false;
+    }
+  }
+}

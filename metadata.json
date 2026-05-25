@@ -1,0 +1,6 @@
+{
+  "name": "BedSore Guardian",
+  "description": "An authoritative medical AI core engine and clinical workflow dashboard for pressure ulcer prevention, Braden Scale risk assessment, and legally binding turning compliance.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,28 @@
+{
+  "entities": {
+    "ClinicalLog": {
+      "title": "ClinicalLog",
+      "description": "A single clinical assessment log saved by a nurse",
+      "type": "object",
+      "properties": {
+        "timestamp": { "type": "string" },
+        "patientName": { "type": "string" },
+        "bedNo": { "type": "string" },
+        "patientAge": { "type": "string" },
+        "riskLevel": { "type": "string" },
+        "bradenTotal": { "type": "number" },
+        "scanStatus": { "type": "string" },
+        "clinicalText": { "type": "string" },
+        "ownerId": { "type": "string", "description": "The UID of the user who created this log" },
+        "createdAt": { "type": "number", "description": "Server timestamp of creation" }
+      },
+      "required": ["timestamp", "patientName", "ownerId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/clinical_logs/{logId}": {
+      "schema": { "$ref": "#/entities/ClinicalLog" },
+      "description": "Collection of all clinical logs submitted by nurses or doctors."
+    }
+  }
+}
