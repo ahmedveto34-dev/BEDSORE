@@ -804,7 +804,15 @@ export default function App() {
       } catch (e) {}
 
       // Update scanner UI
-      setScanMessage(`✅ تم مسح الكود بنجاح. الممرض المسئول: احمد وحيد قام بإتمام عملية التقليب وتوثيقها للسرير [${currentPatient.bedNo}].`);
+      const successMessage = `✅ تم مسح الكود بنجاح. الممرض المسئول: احمد وحيد قام بإتمام عملية التقليب وتوثيقها للسرير [${currentPatient.bedNo}].`;
+      setScanMessage(successMessage);
+      
+      if (Notification.permission === "granted") {
+        const timeStr = new Date().toLocaleTimeString(lang === "ar" ? "ar-SA" : "en-US");
+        new Notification(`تأكيد المسح السريري`, {
+          body: `تم إتمام عملية التقليب بنجاح في تمام الساعة ${timeStr}\nالممرض المسئول: احمد وحيد\nالسرير: ${currentPatient.bedNo}`
+        });
+      }
       
       // Update patient status to VERIFIED
       setPatients(prev => prev.map(p => {
