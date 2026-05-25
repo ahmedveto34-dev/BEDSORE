@@ -266,10 +266,15 @@ export default function App() {
   const sirenIntervalRef = useRef<any>(null);
 
   const triggerStrongSiren = () => {
-    if (!notificationsEnabled) return;
     setIsSirenActive(true);
     if (sirenIntervalRef.current) clearInterval(sirenIntervalRef.current);
     
+    // Always show visual. Try to play audio if allowed or enabled.
+    if (!notificationsEnabled) {
+        // We still show the visual siren, but skip the aggressive audio to respect settings.
+        return;
+    }
+
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     if (!AudioContextClass) return;
     const ctx = new AudioContextClass();
@@ -295,6 +300,10 @@ export default function App() {
         gain.gain.setValueAtTime(0.8, ctx.currentTime);
         gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
         
+        if (ctx.state === 'suspended') {
+            ctx.resume().catch(() => {});
+        }
+        
         osc1.start(ctx.currentTime);
         osc2.start(ctx.currentTime);
         osc1.stop(ctx.currentTime + 0.4);
@@ -315,7 +324,7 @@ export default function App() {
     fetch("/api/admin/siren/stop", { method: "POST" }).catch(() => {});
   };
 
-  // Subscribe to Pusher for global siren status
+  // Subscribe to Pusher and Fallback Polling for global siren status
   useEffect(() => {
     const key = import.meta.env.VITE_PUSHER_KEY;
     const cluster = import.meta.env.VITE_PUSHER_CLUSTER;
@@ -1459,8 +1468,11 @@ export default function App() {
                         </p>
                         <button 
                           onClick={() => {
+                            // Trigger immediately locally to ensure audio works
+                            triggerStrongSiren();
+                            
                             fetch("/api/admin/siren", { method: "POST" })
-                              .then(() => alert("تم تفعيل الإنذار العاجل لجميع الأقسام بنجاح."))
+                              .then(() => alert("تم تفعيل الإنذار محلياً. لكي يصل لباقي الأجهزة وممرضين الأقسام الأخرى يجب دمج Pusher أو Firebase في Vercel."))
                               .catch(e => console.error(e));
                           }}
                           className="w-full bg-rose-600 hover:bg-rose-700 text-white font-black py-4 rounded uppercase tracking-wide cursor-pointer text-lg transition-all shadow-md flex items-center justify-center gap-2"

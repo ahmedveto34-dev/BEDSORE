@@ -14,9 +14,12 @@ export const ensureAuthenticated = async () => {
             await signInAnonymously(auth);
         } catch (e: any) {
             console.error("Auth failed:", e);
-            if (e.code === 'auth/admin-restricted-operation') {
+            if (e.code === 'auth/admin-restricted-operation' || e.code === 'auth/operation-not-allowed') {
                 console.warn("CRITICAL: You must enable 'Anonymous' Sign-in provider in your Firebase project Authentication settings for this applet to work.");
+                // Fail gracefully instead of crashing
+                return null;
             }
         }
     }
+    return auth.currentUser;
 };
