@@ -44,6 +44,7 @@ export interface Patient {
   escalationMessage?: string;
   qrCodeValue: string;
   scanStatus: "PENDING_SCAN" | "VERIFIED" | "VIOLATION";
+  existingUlcers?: string[]; // Added: array of current ulcer locations
 }
 
 export interface TurnLog {

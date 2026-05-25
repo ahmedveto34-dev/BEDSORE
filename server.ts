@@ -3,14 +3,105 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import webpush from "web-push";
 
 dotenv.config();
+
+// Web Push Setup
+const publicVapidKey = "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLcg05SR1oE8";
+const privateVapidKey = "iU_O40P4D9ZkSps3Eksd6PqZ0JgWd5_P_4Z71VlXN7k";
+webpush.setVapidDetails("mailto:admin@bedsoreguardian.com", publicVapidKey, privateVapidKey);
 
 // Initialize Express
 const app = express();
 app.use(express.json());
 
 const PORT = 3000;
+
+// Push Subscriptions Store
+let subscriptions: any[] = [];
+
+app.post("/api/subscribe", (req, res) => {
+  const subscription = req.body;
+  if (!subscriptions.some(s => s.endpoint === subscription.endpoint)) {
+    subscriptions.push(subscription);
+  }
+  res.status(201).json({});
+});
+
+let globalSirenActive = false;
+
+app.post("/api/admin/siren", (req, res) => {
+  globalSirenActive = true;
+  // Send push notification to all subscribers
+  const payload = {
+    title: "🚨 إنذار عاجل للممرضين",
+    body: "الرجاء الالتزام بجدول تقليب المرضي وعمل غيار علي القرح ان وجدت. إن الله يراك. شكرا لمجهودك العظيم.",
+    type: "siren"
+  };
+  subscriptions.forEach(sub => {
+    webpush.sendNotification(sub, JSON.stringify(payload)).catch(e => console.error("Push error", e));
+  });
+  res.json({ success: true });
+});
+
+app.post("/api/admin/siren/stop", (req, res) => {
+  globalSirenActive = false;
+  res.json({ success: true });
+});
+
+app.get("/api/siren-status", (req, res) => {
+  res.json({ active: globalSirenActive });
+});
+
+// Server-side Cron for Sending Background Notifications
+let lastSentAlertTime = "";
+
+setInterval(() => {
+  const now = new Date();
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+
+  const isTargetHourContext = currentHour % 2 !== 0; // 1, 3, 5...
+  const nextHourIsOdd = (currentHour + 1) % 2 !== 0; // if current is 0, 2, 4
+
+  let payload = null;
+
+  // Alert 10 minutes before the odd hour
+  if (nextHourIsOdd && currentMinute === 50) {
+    const key = `pre-${currentHour}`;
+    if (lastSentAlertTime !== key) {
+      lastSentAlertTime = key;
+      payload = {
+        title: "تنبيه: اقترب موعد التقليب الافتراضي!",
+        body: `بقي 10 دقائق لموعد التقليب القادم (الساعة ${currentHour + 1}:00). الرجاء الاستعداد.`,
+        type: "pre-alert"
+      };
+    }
+  }
+
+  // Alert exactly on the odd hour
+  if (isTargetHourContext && currentMinute === 0) {
+    const key = `alert-${currentHour}`;
+    if (lastSentAlertTime !== key) {
+      lastSentAlertTime = key;
+      payload = {
+        title: "تنبيه عاجل: موعد التقليب الآني!",
+        body: `الساعة الآن ${currentHour}:00. حان الوقت لإجراء التقليب الإلزامي لجميع المرضى المدرجين بالجدول.`,
+        type: "alert"
+      };
+    }
+  }
+
+  if (payload) {
+    subscriptions.forEach(sub => {
+      webpush.sendNotification(sub, JSON.stringify(payload)).catch(err => {
+        console.error("Push error:", err);
+      });
+    });
+  }
+}, 30000); // check every 30s
+
 
 // Lazy initialize Gemini AI with safe check
 let aiClient: GoogleGenAI | null = null;
@@ -156,7 +247,7 @@ function performAlgorithmicEvaluation(clinicalText: string, isDelayAttempted: bo
 
 // REST API for processing clinical logs
 app.post("/api/analyze-log", async (req, res) => {
-  const { clinicalText, isDelayAttempted, delayReason } = req.body;
+  const { clinicalText, isDelayAttempted, delayReason, existingUlcers } = req.body;
   
   if (!clinicalText) {
     return res.status(400).json({ error: "الرجاء إدخال النص السريري للتقييم." });
@@ -188,6 +279,8 @@ Based on the score, dictate mandatory, legally binding turning and repositioning
 - Moderate Risk: Every 3 hours
 - Low Risk: Every 4 hours
 
+Analyze existing ulcers if provided. If the patient has existing ulcers on certain parts of the body, strictly instruct the nurses NOT to position the patient on those specific areas, and instead provide safe alternative positioning angles. Mention the existing ulcers explicitly in the instructions to ensure they are handled properly.
+
 Analyze delay attempts: If isDelayAttempted is true, or if the clinicalText indicates delayed turning or attempts an unauthorized delay:
 1. Generate an authoritative legal/medical alert warning.
 2. Output "Escalation Status: CRITICAL" (حالة التصعيد: حرجة!).
@@ -215,7 +308,7 @@ You must return a JSON response matching this TypeScript schema:
     "title": "تقرير تقييم قرح الفراش والالتزام بالتقليب",
     "riskLevelArabic": string, // e.g. "خطورة بالغة (Severe Risk)"
     "immediateAction": string, // Professional medical Arabic markdown detailing immediate skin nursing actions required
-    "nextTurningInstructions": string, // Professional medical Arabic markdown detailing next turning timing, angles, bed adjustments, microclimate management, and strict compliance instructions
+    "nextTurningInstructions": string, // Professional medical Arabic markdown detailing next turning timing, angles, bed adjustments, microclimate management. Ensure you warn about avoiding existing ulcers if they exist.
     "escalationWarning": string, // Strict medical-legal warning if delay is attempted, or positive compliance message
     "isEscalated": boolean
   },
@@ -226,6 +319,8 @@ Crucial: Return ONLY raw JSON, with no backticks, markdown markers, or leading/t
 
     const userPromptText = `Clinical Assessment Log Entered by Nurse:
 "${clinicalText}"
+
+Existing known ulcers for this patient: ${existingUlcers ? existingUlcers.join(", ") : "None reported currently"}
 
 Nurse reported unauthorized delay or shift delayed? ${isDelayAttempted ? "YES. Reason: " + delayReason : "NO"}
 Please evaluate.`;

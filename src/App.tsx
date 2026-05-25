@@ -37,6 +37,7 @@ import {
   Edit3,
   Play
 } from "lucide-react";
+import { Html5QrcodeScanner } from "html5-qrcode";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend } from "recharts";
 import QRCode from "react-qr-code";
 import { INITIAL_PATIENTS, INITIAL_LOGS, ARABIC_SAMPLE_LOGS } from "./data";
@@ -157,6 +158,39 @@ export default function App() {
   const [scanMessage, setScanMessage] = useState<string | null>(null);
   const [audioBeep, setAudioBeep] = useState<boolean>(false);
 
+  const handleScanSuccessRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!simulatedCameraFeed) return;
+    
+    // Slight delay to ensure DOM element is ready
+    const timer = setTimeout(() => {
+      let isCleanedUp = false;
+      const scanner = new Html5QrcodeScanner("qr-reader", {
+        fps: 10,
+        qrbox: { width: 200, height: 200 },
+      }, false);
+
+      scanner.render(
+        (decodedText) => {
+          if (isCleanedUp) return;
+          scanner.clear().catch(console.error);
+          if (handleScanSuccessRef.current) {
+             handleScanSuccessRef.current(decodedText);
+          }
+        },
+        () => {}
+      );
+
+      return () => {
+        isCleanedUp = true;
+        scanner.clear().catch(console.error);
+      };
+    }, 100);
+    
+    return () => clearTimeout(timer);
+  }, [simulatedCameraFeed]);
+
   // Manual Adjuster State (Allows manual override of Braden factors in UI)
   const [bradenSliders, setBradenSliders] = useState<BradenScore>({
     sensoryPerception: 1,
@@ -174,6 +208,8 @@ export default function App() {
   const [newPatientBed, setNewPatientBed] = useState<string>("");
   const [newPatientAge, setNewPatientAge] = useState<number>(65);
   const [newPatientAdmission, setNewPatientAdmission] = useState<string>("");
+  const [newPatientUlcers, setNewPatientUlcers] = useState<string>("");
+  const [newPatientBradenTotal, setNewPatientBradenTotal] = useState<number>(15);
 
   // Countdown timer simulation for next turning
   const [timeLeftStr, setTimeLeftStr] = useState<string>("01:29:55");
@@ -223,6 +259,85 @@ export default function App() {
     return saved ? JSON.parse(saved) : false;
   });
   
+  // Strong Siren State
+  const [isSirenActive, setIsSirenActive] = useState(false);
+  const [sirenDismissText, setSirenDismissText] = useState("");
+  const sirenIntervalRef = useRef<any>(null);
+
+  const triggerStrongSiren = () => {
+    if (!notificationsEnabled) return;
+    setIsSirenActive(true);
+    if (sirenIntervalRef.current) clearInterval(sirenIntervalRef.current);
+    
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    
+    // Play an immediate strong dual-frequency pulse
+    const playPulse = () => {
+      try {
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(ctx.destination);
+        
+        osc1.type = "sawtooth";
+        osc2.type = "square";
+        
+        osc1.frequency.setValueAtTime(800, ctx.currentTime);
+        osc1.frequency.setValueAtTime(1200, ctx.currentTime + 0.2);
+        osc2.frequency.setValueAtTime(820, ctx.currentTime);
+        osc2.frequency.setValueAtTime(1220, ctx.currentTime + 0.2);
+        
+        gain.gain.setValueAtTime(0.8, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+        
+        osc1.start(ctx.currentTime);
+        osc2.start(ctx.currentTime);
+        osc1.stop(ctx.currentTime + 0.4);
+        osc2.stop(ctx.currentTime + 0.4);
+      } catch (e) { }
+    };
+    
+    playPulse();
+    sirenIntervalRef.current = setInterval(playPulse, 400);
+  };
+
+  const stopSiren = () => {
+    setIsSirenActive(false);
+    if (sirenIntervalRef.current) {
+      clearInterval(sirenIntervalRef.current);
+      sirenIntervalRef.current = null;
+    }
+    fetch("/api/admin/siren/stop", { method: "POST" }).catch(() => {});
+  };
+
+  // Poll for global siren status
+  useEffect(() => {
+    const pollSirenStatus = async () => {
+      try {
+        const res = await fetch("/api/siren-status");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.active && !isSirenActive) {
+            triggerStrongSiren();
+          } else if (!data.active && isSirenActive) {
+            // Only auto-stop if server says false, handled gracefully
+            setIsSirenActive(false);
+            if (sirenIntervalRef.current) {
+              clearInterval(sirenIntervalRef.current);
+              sirenIntervalRef.current = null;
+            }
+          }
+        }
+      } catch (e) {}
+    };
+    const sInt = setInterval(pollSirenStatus, 3000);
+    return () => clearInterval(sInt);
+  }, [isSirenActive, notificationsEnabled]);
+
   useEffect(() => {
     localStorage.setItem("bs_audio_enabled", JSON.stringify(notificationsEnabled));
   }, [notificationsEnabled]);
@@ -231,8 +346,47 @@ export default function App() {
   useEffect(() => {
     if ("Notification" in window && Notification.permission === "granted") {
       setNotificationsEnabled(true);
+      registerAndSubscribePush();
     }
   }, []);
+
+  const registerAndSubscribePush = async () => {
+    try {
+      if ('serviceWorker' in navigator && 'PushManager' in window) {
+        const registration = await navigator.serviceWorker.register('/sw.js');
+        
+        const publicVapidKey = 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLcg05SR1oE8';
+        function urlBase64ToUint8Array(base64String: string) {
+          const padding = '='.repeat((4 - base64String.length % 4) % 4);
+          const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+          const rawData = window.atob(base64);
+          const outputArray = new Uint8Array(rawData.length);
+          for (let i = 0; i < rawData.length; ++i) {
+            outputArray[i] = rawData.charCodeAt(i);
+          }
+          return outputArray;
+        }
+
+        let subscription = await registration.pushManager.getSubscription();
+        if (!subscription) {
+           subscription = await registration.pushManager.subscribe({
+             userVisibleOnly: true,
+             applicationServerKey: urlBase64ToUint8Array(publicVapidKey)
+           });
+        }
+        
+        await fetch('/api/subscribe', {
+          method: 'POST',
+          body: JSON.stringify(subscription),
+          headers: {
+            'content-type': 'application/json'
+          }
+        });
+      }
+    } catch (e) {
+      console.error('Service worker/push error', e);
+    }
+  };
 
   const handleRequestNotification = async () => {
     if (!("Notification" in window)) {
@@ -242,8 +396,9 @@ export default function App() {
     const permission = await Notification.requestPermission();
     if (permission === "granted") {
       setNotificationsEnabled(true);
+      await registerAndSubscribePush();
       new Notification("تم تفعيل التنبيهات", {
-        body: "سيتم تنبيهك قبل 10 دقائق من موعد التقليب القادم."
+        body: "سيتم تنبيهك دائماً عندما يحين موعد التقليب، حتى وإن كان التطبيق مغلقاً كلياً."
       });
     } else {
       alert("تم رفض التنبيهات. يرجى تفعيلها من إعدادات المتصفح.");
@@ -261,11 +416,9 @@ export default function App() {
             new Notification(`تنبيه: اقترب موعد التقليب!`, {
               body: `المريض: ${currentPatient.name}\nسرير: ${currentPatient.bedNo}\nمتبقي 10 دقائق لموعد التقليب القادم. الرجاء الاستعداد.`
             });
-            try {
-              // optional fallback sound
-              const audio = new Audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg");
-              audio.play().catch(() => {});
-            } catch(e) {}
+            try { playTestAudio(); } catch(e) {}
+          } else {
+            try { playTestAudio(); } catch(e) {}
           }
         }
       }
@@ -295,6 +448,8 @@ export default function App() {
               body: `بقي 10 دقائق لموعد التقليب القادم (الساعة ${currentHour + 1}:00). الرجاء الاستعداد.`
             });
             try { playTestAudio(); } catch(e) {}
+          } else {
+            try { playTestAudio(); } catch(e) {}
           }
         }
       }
@@ -309,7 +464,9 @@ export default function App() {
             new Notification(`تنبيه عاجل: موعد التقليب الآني!`, {
               body: `الساعة الآن ${currentHour}:00. حان الوقت لإجراء التقليب الإلزامي لجميع المرضى المدرجين بالجدول.`
             });
-            try { playTestAudio(); } catch(e) {}
+            try { triggerStrongSiren(); } catch(e) {}
+          } else {
+            try { triggerStrongSiren(); } catch(e) {}
           }
         }
       }
@@ -434,7 +591,7 @@ export default function App() {
   // Admin Setup
   const handleAdminLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    if (adminPasscode === "1234") {
+    if (adminPasscode === "waheed") {
       setIsAdminLoggedIn(true);
       setAdminError("");
       setAdminPasscode("");
@@ -513,6 +670,10 @@ export default function App() {
   const playTestAudio = () => {
     if (!notificationsEnabled) return;
     try {
+      if (selectedTone === "alert") {
+         triggerStrongSiren();
+         return;
+      }
       if (selectedTone === "custom" && customAudioUrl) {
         const audio = new Audio(customAudioUrl);
         audio.play().catch(e => console.error("Audio playback failed", e));
@@ -528,17 +689,7 @@ export default function App() {
         osc.connect(gain);
         gain.connect(ctx.destination);
         
-        if (selectedTone === "alert") {
-          osc.type = "square";
-          osc.frequency.setValueAtTime(400, ctx.currentTime);
-          osc.frequency.setValueAtTime(600, ctx.currentTime + 0.15);
-          osc.frequency.setValueAtTime(400, ctx.currentTime + 0.3);
-          osc.frequency.setValueAtTime(600, ctx.currentTime + 0.45);
-          gain.gain.setValueAtTime(0.5, ctx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.6);
-          osc.start(ctx.currentTime);
-          osc.stop(ctx.currentTime + 0.6);
-        } else if (selectedTone === "soft") {
+        if (selectedTone === "soft") {
           osc.type = "sine";
           osc.frequency.setValueAtTime(440, ctx.currentTime);
           gain.gain.setValueAtTime(0, ctx.currentTime);
@@ -568,7 +719,16 @@ export default function App() {
 
   const savePatientEdit = () => {
     if (!editingPatientId) return;
-    setPatients(prev => prev.map(p => p.id === editingPatientId ? { ...p, ...editPatientData } as Patient : p));
+
+    let finalData = { ...editPatientData };
+    if (finalData.bradenScore && typeof finalData.bradenScore.total !== 'undefined') {
+        const { riskLevel, riskLevelArabic, interval } = calculateBradenRisk(finalData.bradenScore.total);
+        finalData.riskLevel = riskLevel;
+        finalData.riskLevelArabic = riskLevelArabic;
+        finalData.turningIntervalHours = interval;
+    }
+
+    setPatients(prev => prev.map(p => p.id === editingPatientId ? { ...p, ...finalData } as Patient : p));
     setEditingPatientId(null);
   };
 
@@ -675,7 +835,6 @@ export default function App() {
   // Live countdown timer state simulation
   useEffect(() => {
     const timer = setInterval(() => {
-      // Pick random seconds decrement to simulate a real-time countdown
       const parts = timeLeftStr.split(":");
       let hrs = parseInt(parts[0]);
       let mins = parseInt(parts[1]);
@@ -684,25 +843,28 @@ export default function App() {
       if (secs > 0) {
         secs--;
       } else {
-        secs = 59;
         if (mins > 0) {
           mins--;
+          secs = 59;
         } else {
-          mins = 59;
           if (hrs > 0) {
             hrs--;
+            mins = 59;
+            secs = 59;
           } else {
-            hrs = 1; // loop back safely for demo
+             // Zero reached
+             hrs = 1; // loop back safely for demo
+             triggerStrongSiren();
           }
         }
       }
 
       const format = (num: number) => num.toString().padStart(2, '0');
-      setTimeLeftStr(`${format(hrs)}:${format(mins)}:${format(format === undefined ? 0 : secs)}`);
+      setTimeLeftStr(`${format(hrs)}:${format(mins)}:${format(secs)}`);
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [timeLeftStr]);
+  }, [timeLeftStr, notificationsEnabled]);
 
   // Handle Preset Case quick-insertion
   const handlePresetInsert = (text: string) => {
@@ -722,7 +884,8 @@ export default function App() {
         body: JSON.stringify({
           clinicalText,
           isDelayAttempted,
-          delayReason: isDelayAttempted ? (delayReason || "عجز تشغيلي مؤقت بالكادر") : ""
+          delayReason: isDelayAttempted ? (delayReason || "عجز تشغيلي مؤقت بالكادر") : "",
+          existingUlcers: currentPatient.existingUlcers
         })
       });
 
@@ -733,6 +896,10 @@ export default function App() {
       const data: AnalysisResponse = await response.json();
       setAnalysisResult(data);
       
+      if (data.isEscalated) {
+        triggerStrongSiren();
+      }
+
       // Update patient profile locally
       setPatients(prev => prev.map(p => {
         if (p.id === selectedPatientId) {
@@ -778,6 +945,88 @@ export default function App() {
     }
   };
 
+  // Handle successful QR code scan
+  const handleScanSuccess = (scannedCode: string) => {
+    // Allow any scan in demo, but show the scanned code
+    setAudioBeep(true);
+    // Play beep sound
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+      osc.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      osc.frequency.value = 1046.50; // High C note (beep!)
+      gainNode.gain.setValueAtTime(0.12, audioCtx.currentTime);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.15);
+    } catch (e) {}
+
+    // Update scanner UI
+    const successMessage = `✅ تم مسح الكود بنجاح. الممرض المسئول: احمد وحيد قام بإتمام عملية التقليب وتوثيقها للسرير [${currentPatient.bedNo}].`;
+    setScanMessage(successMessage);
+    
+    if (Notification.permission === "granted") {
+      const timeStr = new Date().toLocaleTimeString(lang === "ar" ? "ar-SA" : "en-US");
+      new Notification(`تأكيد المسح السريري`, {
+        body: `تم إتمام عملية التقليب بنجاح في تمام الساعة ${timeStr}\nالممرض المسئول: احمد وحيد\nالسرير: ${currentPatient.bedNo}`
+      });
+    }
+    
+    // Update patient status to VERIFIED
+    setPatients(prev => prev.map(p => {
+      if (p.id === selectedPatientId) {
+        return {
+          ...p,
+          scanStatus: "VERIFIED",
+          isEscalated: false // Scanning clears immediate escalation blocks
+        };
+      }
+      return p;
+    }));
+
+    // Append verified log
+    const newLog: TurnLog = {
+      id: `logs_${Date.now()}`,
+      patientId: currentPatient.id,
+      patientName: currentPatient.name,
+      bedNo: currentPatient.bedNo,
+      timestamp: new Date().toISOString(),
+      actionTaken: "تقليب مادي معتمد والتحقق من التواجد الفعلي عبر رمز QR السريري",
+      nurseNotes: `المطابقة اليدوية لرمز الاستجابة السريعة: ${scannedCode}. مستوى الخطورة المعتمد: ${currentPatient.riskLevelArabic || "شديدة"}. تم التقليب بواسطة الممرض المسئول: احمد وحيد.`,
+      bradenScoreText: `درجة برادن: ${currentPatient.bradenScore?.total || bradenSliders.total} (${currentPatient.riskLevelArabic || "مخاطر عالية"})`,
+      isEscalated: false,
+      verificationMethod: "QR_BEDSIDE_SCAN",
+      status: "COMPLIANT"
+    };
+
+    setLogs(prev => [newLog, ...prev]);
+
+    // If we had an analysis result, clear the escalation state
+    if (analysisResult) {
+      setAnalysisResult(prev => prev ? {
+        ...prev,
+        isEscalated: false,
+        arabicReport: {
+          ...prev.arabicReport,
+          escalationWarning: "🟢 تم إنهاء حالة التصعيد بنجاح عقب إتمام المسح السريري المتطابق بجوار السرير.",
+          isEscalated: false
+        }
+      } : null);
+    }
+
+    setTimeout(() => {
+      setIsScanningActive(false);
+      setSimulatedCameraFeed(false);
+      setScanMessage(null);
+      setAudioBeep(false);
+    }, 3500);
+  };
+
+  useEffect(() => {
+    handleScanSuccessRef.current = handleScanSuccess;
+  }, [handleScanSuccess]);
+
   // Perform physical Bedside QR scan simulation
   const triggerBedsideScan = (method: "CAMERA" | "INSTANT") => {
     setIsScanningActive(true);
@@ -785,85 +1034,11 @@ export default function App() {
     
     if (method === "CAMERA") {
       setSimulatedCameraFeed(true);
-    }
-
-    setTimeout(() => {
-      // Simulate successful bed scan
-      setAudioBeep(true);
-      // Play beep sound
-      try {
-        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const osc = audioCtx.createOscillator();
-        const gainNode = audioCtx.createGain();
-        osc.connect(gainNode);
-        gainNode.connect(audioCtx.destination);
-        osc.frequency.value = 1046.50; // High C note (beep!)
-        gainNode.gain.setValueAtTime(0.12, audioCtx.currentTime);
-        osc.start();
-        osc.stop(audioCtx.currentTime + 0.15);
-      } catch (e) {}
-
-      // Update scanner UI
-      const successMessage = `✅ تم مسح الكود بنجاح. الممرض المسئول: احمد وحيد قام بإتمام عملية التقليب وتوثيقها للسرير [${currentPatient.bedNo}].`;
-      setScanMessage(successMessage);
-      
-      if (Notification.permission === "granted") {
-        const timeStr = new Date().toLocaleTimeString(lang === "ar" ? "ar-SA" : "en-US");
-        new Notification(`تأكيد المسح السريري`, {
-          body: `تم إتمام عملية التقليب بنجاح في تمام الساعة ${timeStr}\nالممرض المسئول: احمد وحيد\nالسرير: ${currentPatient.bedNo}`
-        });
-      }
-      
-      // Update patient status to VERIFIED
-      setPatients(prev => prev.map(p => {
-        if (p.id === selectedPatientId) {
-          return {
-            ...p,
-            scanStatus: "VERIFIED",
-            isEscalated: false // Scanning clears immediate escalation blocks
-          };
-        }
-        return p;
-      }));
-
-      // Append verified log
-      const newLog: TurnLog = {
-        id: `logs_${Date.now()}`,
-        patientId: currentPatient.id,
-        patientName: currentPatient.name,
-        bedNo: currentPatient.bedNo,
-        timestamp: new Date().toISOString(),
-        actionTaken: "تقليب مادي معتمد والتحقق من التواجد الفعلي عبر رمز QR السريري",
-        nurseNotes: `المطابقة اليدوية لرمز الاستجابة السريعة: ${currentPatient.qrCodeValue}. مستوى الخطورة المعتمد: ${currentPatient.riskLevelArabic || "شديدة"}. تم التقليب بواسطة الممرض المسئول: احمد وحيد.`,
-        bradenScoreText: `درجة برادن: ${currentPatient.bradenScore?.total || bradenSliders.total} (${currentPatient.riskLevelArabic || "مخاطر عالية"})`,
-        isEscalated: false,
-        verificationMethod: "QR_BEDSIDE_SCAN",
-        status: "COMPLIANT"
-      };
-
-      setLogs(prev => [newLog, ...prev]);
-
-      // If we had an analysis result, clear the escalation state
-      if (analysisResult) {
-        setAnalysisResult(prev => prev ? {
-          ...prev,
-          isEscalated: false,
-          arabicReport: {
-            ...prev.arabicReport,
-            escalationWarning: "🟢 تم إنهاء حالة التصعيد بنجاح عقب إتمام المسح السريري المتطابق بجوار السرير.",
-            isEscalated: false
-          }
-        } : null);
-      }
-
+    } else {
       setTimeout(() => {
-        setIsScanningActive(false);
-        setSimulatedCameraFeed(false);
-        setScanMessage(null);
-        setAudioBeep(false);
-      }, 3500);
-
-    }, 2000);
+        handleScanSuccess(currentPatient.qrCodeValue);
+      }, 1000);
+    }
   };
 
   // Reset/Clear Simulation Violation Status to force compliance testing
@@ -896,6 +1071,13 @@ export default function App() {
     setLogs(prev => [violationLog, ...prev]);
   };
 
+  const calculateBradenRisk = (total: number) => {
+    if (total <= 9) return { riskLevel: "Severe Risk", riskLevelArabic: "خطورة بالغة", interval: 2 };
+    if (total <= 12) return { riskLevel: "High Risk", riskLevelArabic: "خطورة عالية", interval: 2 };
+    if (total <= 14) return { riskLevel: "Moderate Risk", riskLevelArabic: "خطورة متوسطة", interval: 3 };
+    return { riskLevel: "Low Risk", riskLevelArabic: "خطورة منخفضة", interval: 4 };
+  };
+
   // Add new Custom Patient Handler
   const handleCreatePatient = (e: React.FormEvent) => {
     e.preventDefault();
@@ -904,12 +1086,15 @@ export default function App() {
       return;
     }
 
+    const { riskLevel, riskLevelArabic, interval } = calculateBradenRisk(newPatientBradenTotal);
+
     const newP: Patient = {
       id: `p_${Date.now()}`,
       name: newPatientName,
       bedNo: newPatientBed,
       age: Number(newPatientAge),
       admissionReason: newPatientAdmission || "حالة مراقبة جلدية عامة وقرح الفراش",
+      existingUlcers: newPatientUlcers ? newPatientUlcers.split("،").map(s => s.trim()).filter(s => s) : [],
       lastClinicalText: "المريض تحت الفحص والمراقبة. الجلد سليم مؤقتاً ولكن يحتاج إلى تقييم أولي وبناء الخطة.",
       bradenScore: {
         sensoryPerception: 3,
@@ -918,12 +1103,12 @@ export default function App() {
         mobility: 3,
         nutrition: 3,
         frictionShear: 2,
-        total: 17
+        total: newPatientBradenTotal
       },
-      riskLevel: "Low Risk",
-      riskLevelArabic: "خطورة منخفضة (Low Risk)",
-      turningIntervalHours: 3.0,
-      nextTurningTime: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+      riskLevel: riskLevel,
+      riskLevelArabic: riskLevelArabic,
+      turningIntervalHours: interval,
+      nextTurningTime: new Date(Date.now() + interval * 60 * 60 * 1000).toISOString(),
       isEscalated: false,
       qrCodeValue: `BEDS-${newPatientBed.replace(/\s+/g, '')}_NEW`,
       scanStatus: "PENDING_SCAN"
@@ -1010,6 +1195,56 @@ export default function App() {
   return (
     <div className={`flex flex-col h-screen min-h-[768px] w-full bg-slate-100 font-sans overflow-hidden ${lang === "ar" ? "text-right" : "text-left"} select-none text-slate-800`} dir={lang === "ar" ? "rtl" : "ltr"}>
       
+      {/* SIREN OVERLAY */}
+      {isSirenActive && (
+        <div className="fixed inset-0 z-[9999] bg-rose-900/90 backdrop-blur-sm flex flex-col items-center justify-center p-6 animate-pulse">
+           <div className="bg-rose-950 border-4 border-rose-500 rounded-2xl shadow-2xl p-8 max-w-2xl w-full text-center">
+             <h2 className="text-4xl font-black text-rose-50 mb-4 animate-bounce">🚨 عاجل: إنذار طبي حرج 🚨</h2>
+             <p className="text-xl text-rose-200 mb-6 font-bold leading-relaxed flex flex-col gap-2">
+               <span>الرجاء الالتزام بجدول تقليب المرضي وعمل غيار علي القرح ان وجدت</span>
+               <span className="text-3xl text-white my-2">إن الله يراك</span>
+               <span>شكرا لمجهودك العظيم</span>
+               <span className="text-sm mt-4 text-rose-300 block">يرجى إدخال الجملة التالية لإيقاف الإنذار: "انا بالمنزل"</span>
+             </p>
+             
+             {lastAnnouncement && (
+               <div className="mb-6 bg-slate-900 border border-rose-500 rounded-lg p-4 animate-pulse">
+                 <h3 className="text-rose-400 text-sm font-bold flex items-center justify-center gap-2 mb-2">
+                   <Bell className="w-4 h-4" />
+                   رسالة المشرف:
+                 </h3>
+                 <p className="text-2xl text-white font-black leading-relaxed">
+                   {lastAnnouncement.text}
+                 </p>
+               </div>
+             )}
+             
+             <div className="flex flex-col items-center gap-4">
+               <input 
+                 type="text"
+                 placeholder="اكتب 'انا بالمنزل' لإيقاف الإنذار"
+                 value={sirenDismissText}
+                 onChange={(e) => setSirenDismissText(e.target.value)}
+                 className="w-full max-w-md p-4 text-center text-xl text-slate-800 rounded outline-none border-2 border-rose-400 focus:border-rose-600 focus:ring-4 focus:ring-rose-200"
+               />
+               
+               <button 
+                 onClick={() => {
+                   if (sirenDismissText.trim() === "انا بالمنزل") {
+                     stopSiren();
+                     setSirenDismissText("");
+                   }
+                 }}
+                 className={`${sirenDismissText.trim() === "انا بالمنزل" ? "bg-white text-rose-800 hover:bg-rose-100 opacity-100 hover:scale-105" : "bg-slate-300 text-slate-500 opacity-50 cursor-not-allowed"} text-2xl font-black py-4 px-12 rounded-full transition-all shadow-xl border border-rose-200`}
+                 disabled={sirenDismissText.trim() !== "انا بالمنزل"}
+               >
+                 إيقاف الإنذار المؤقت
+               </button>
+             </div>
+           </div>
+        </div>
+      )}
+
       {/* HEADER SECTION (from Professional Polish Mockup specs) */}
       <header className="bg-slate-900 text-white px-6 py-4 flex flex-col md:flex-row justify-between items-center shadow-md border-b border-rose-950 flex-shrink-0 print:hidden">
         <div className="flex items-center gap-4 w-full md:w-auto">
@@ -1184,6 +1419,26 @@ export default function App() {
                           </button>
                         </form>
                       </div>
+
+                      <div className="p-6 border-2 border-rose-200 rounded-xl bg-rose-50 shadow-sm flex flex-col gap-6 mt-6">
+                        <h3 className="font-bold text-rose-800 text-lg flex items-center gap-2">
+                          <AlertOctagon className="text-rose-600" />
+                          تفعيل إنذار الطوارئ للممرضين
+                        </h3>
+                        <p className="text-sm text-rose-700 leading-relaxed font-bold">
+                          سيقوم هذا الزر بإطلاق إنذار عالي ومستمر في أجهزة جميع الممرضين المتصلين بالنظام وسيعرض رسالة تنبيهية. ولن يتم إيقافه إلا إذا قام الممرض بكتابة "انا بالمنزل".
+                        </p>
+                        <button 
+                          onClick={() => {
+                            fetch("/api/admin/siren", { method: "POST" })
+                              .then(() => alert("تم تفعيل الإنذار العاجل لجميع الأقسام بنجاح."))
+                              .catch(e => console.error(e));
+                          }}
+                          className="w-full bg-rose-600 hover:bg-rose-700 text-white font-black py-4 rounded uppercase tracking-wide cursor-pointer text-lg transition-all shadow-md flex items-center justify-center gap-2"
+                        >
+                          <AlertOctagon /> أطلق الإنذار الآن لكافة الأقسام
+                        </button>
+                      </div>
                     </div>
                   )}
 
@@ -1313,6 +1568,19 @@ export default function App() {
                                     className="text-xs p-2 border border-slate-300 rounded w-20"
                                   />
                                 </div>
+                                <input 
+                                    value={editPatientData.existingUlcers ? editPatientData.existingUlcers.join("، ") : ""} 
+                                    onChange={e => setEditPatientData({...editPatientData, existingUlcers: e.target.value.split("،").map(s => s.trim()).filter(s => s)})}
+                                    placeholder="أماكن القرح المتواجدة (مفصولة بفاصلة)، مثال: أسفل الظهر، الكعب الأيمن"
+                                    className="text-xs p-2 border border-slate-300 rounded w-full"
+                                  />
+                                  <input 
+                                    type="number"
+                                    value={editPatientData.bradenScore?.total || ""} 
+                                    onChange={e => setEditPatientData({...editPatientData, bradenScore: { ...(editPatientData.bradenScore || {sensoryPerception:3, moisture:3, activity:3, mobility:3, nutrition:3, frictionShear:2}), total: Number(e.target.value) }})}
+                                    placeholder="درجة مقياس برادن"
+                                    className="text-xs p-2 border border-slate-300 rounded w-full"
+                                  />
                                 <div className="flex gap-2 justify-end mt-2 border-b border-slate-100 pb-2">
                                   <button onClick={() => deletePatient(p.id)} className="text-[10px] px-3 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-700 rounded font-bold cursor-pointer transition-colors ml-auto mr-auto">
                                     {t.deletePatientBtn}
@@ -1462,6 +1730,20 @@ export default function App() {
                   placeholder={t.admissionReasonPlaceholder} 
                   value={newPatientAdmission}
                   onChange={e => setNewPatientAdmission(e.target.value)}
+                  className="w-full text-xs p-1.5 border border-indigo-200 bg-white rounded focus:ring-1 focus:ring-indigo-400"
+                />
+                <input 
+                  type="text" 
+                  placeholder="أماكن القرح المتواجدة (مفصولة بفاصلة)، مثال: أسفل الظهر، الكعب الأيمن" 
+                  value={newPatientUlcers}
+                  onChange={e => setNewPatientUlcers(e.target.value)}
+                  className="w-full text-xs p-1.5 border border-indigo-200 bg-white rounded focus:ring-1 focus:ring-indigo-400"
+                />
+                <input 
+                  type="number" 
+                  placeholder="درجة مقياس برادن (Braden Score)" 
+                  value={newPatientBradenTotal || ""}
+                  onChange={e => setNewPatientBradenTotal(Number(e.target.value))}
                   className="w-full text-xs p-1.5 border border-indigo-200 bg-white rounded focus:ring-1 focus:ring-indigo-400"
                 />
                 <button type="submit" className="w-full bg-indigo-700 hover:bg-indigo-800 text-white font-bold py-1 rounded text-xs transition-all cursor-pointer">
@@ -1671,10 +1953,16 @@ export default function App() {
                 الملف السريري الحالي الخاضع للمطابقة
               </span>
               <h3 className="text-base font-black text-white">{currentPatient.name}</h3>
-              <p className="text-xs text-slate-300 leading-relaxed font-arabic max-w-lg mb-3">
+              <p className="text-xs text-slate-300 leading-relaxed font-arabic max-w-lg mb-2">
                 <span className="font-bold text-rose-300">التنويم: </span>
                 {currentPatient.admissionReason}
               </p>
+              {currentPatient.existingUlcers && currentPatient.existingUlcers.length > 0 && (
+                <div className="bg-rose-900/40 border border-rose-500/30 p-2 rounded max-w-lg mb-3">
+                  <span className="text-xs font-bold text-rose-300">أماكن القرح المتواجدة حالياً: </span>
+                  <span className="text-xs text-rose-100 font-bold">{currentPatient.existingUlcers.join("، ")}</span>
+                </div>
+              )}
               
               <div className="flex flex-wrap gap-2 print:hidden">
                 {needsAuth ? (
@@ -2052,21 +2340,11 @@ export default function App() {
               <p className="text-xs font-bold text-teal-400">واجهة الكاميرا بجوال الممرض:</p>
               
               {simulatedCameraFeed ? (
-                <div className="relative w-full h-32 bg-slate-950 rounded border border-slate-700 flex items-center justify-center overflow-hidden">
-                  {/* Simulated laser scanline animation */}
-                  <div className="absolute top-0 left-0 w-full h-0.5 bg-rose-500 animate-strike opacity-85 z-10 shadow-[0_0_10px_#ef4444]"></div>
-                  
-                  {/* Subtle target alignment brackets */}
-                  <div className="absolute border-2 border-teal-400 w-24 h-24 pointer-events-none rounded opacity-60"></div>
-
-                  {audioBeep ? (
-                    <div className="text-center p-2 bg-teal-900/95 rounded border border-teal-400 text-teal-100 animate-bounce text-xs font-bold">
+                <div className="relative w-full bg-slate-950 rounded border border-slate-700 flex flex-col overflow-hidden min-h-[300px]">
+                  <div id="qr-reader" className="w-full"></div>
+                  {audioBeep && (
+                    <div className="absolute inset-0 z-50 flex items-center justify-center p-2 bg-teal-900/95 border border-teal-400 text-teal-100 animate-bounce text-sm font-bold">
                       🔔 تم رصد الكود بنجاح (1046hz)
-                    </div>
-                  ) : (
-                    <div className="text-center z-0">
-                      <div className="w-8 h-8 rounded-full border-4 border-slate-500 border-t-teal-500 animate-spin mx-auto mb-2"></div>
-                      <p className="text-[10px] text-slate-300">جاري توجيه الكاميرا نحو المصلق الطبي بجوار السرير...</p>
                     </div>
                   )}
                 </div>
@@ -2143,22 +2421,27 @@ export default function App() {
       )}
 
       {/* FOOTER - Proactive warning and camera launch */}
-      <footer className="h-auto md:h-16 bg-slate-900 border-t-2 border-rose-600 flex flex-col md:flex-row items-center px-6 py-3 md:py-0 justify-between gap-3 md:gap-0 flex-shrink-0 text-white print:hidden">
-        <div className="flex items-center gap-2.5 text-rose-400 animate-pulse text-center md:text-right">
-          <AlertOctagon className="w-5 h-5 flex-shrink-0" />
-          <span className="text-[11px] md:text-xs font-black uppercase tracking-wide font-arabic">
-            {t.footerWarning}
-          </span>
+      <footer className="h-auto md:h-auto bg-slate-900 border-t-2 border-rose-600 flex flex-col items-center px-6 py-4 justify-center flex-shrink-0 text-white print:hidden relative">
+        <div className="flex flex-col md:flex-row w-full justify-between items-center gap-3 mb-2">
+          <div className="flex items-center gap-2.5 text-rose-400 animate-pulse text-center md:text-right">
+            <AlertOctagon className="w-5 h-5 flex-shrink-0" />
+            <span className="text-[11px] md:text-xs font-black uppercase tracking-wide font-arabic">
+              {t.footerWarning}
+            </span>
+          </div>
+          
+          <div className="flex gap-2 w-full md:w-auto">
+            <button 
+              onClick={() => triggerBedsideScan("CAMERA")}
+              className="flex-1 md:flex-none bg-rose-600 hover:bg-rose-700 text-white px-5 py-2 rounded font-bold text-xs shadow-md hover:shadow-lg flex items-center justify-center gap-2 cursor-pointer transition-all uppercase"
+            >
+              <span>بدء مسح الكود بجانب السرير</span>
+              <Camera size={14} />
+            </button>
+          </div>
         </div>
-        
-        <div className="flex gap-2 w-full md:w-auto">
-          <button 
-            onClick={() => triggerBedsideScan("CAMERA")}
-            className="flex-1 md:flex-none bg-rose-600 hover:bg-rose-700 text-white px-5 py-2 rounded font-bold text-xs shadow-md hover:shadow-lg flex items-center justify-center gap-2 cursor-pointer transition-all uppercase"
-          >
-            <span>بدء مسح الكود بجانب السرير</span>
-            <Camera size={14} />
-          </button>
+        <div className="text-base font-bold text-slate-300 -mt-1 drop-shadow">
+          تم الانشاء بواسطة MR.Ahmed Waheed
         </div>
       </footer>
     </div>

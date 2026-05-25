@@ -23,7 +23,8 @@ export const INITIAL_PATIENTS: Patient[] = [
     nextTurningTime: new Date(Date.now() + 1.5 * 60 * 60 * 1000).toISOString(),
     isEscalated: false,
     qrCodeValue: "BEDS-A204_ABDULRAHMAN",
-    scanStatus: "PENDING_SCAN"
+    scanStatus: "PENDING_SCAN",
+    existingUlcers: ["منطقة العجز (أسفل الظهر)", "الكعب الأيمن"]
   },
   {
     id: "p2",
@@ -71,7 +72,8 @@ export const INITIAL_PATIENTS: Patient[] = [
     nextTurningTime: new Date(Date.now() + 1.5 * 60 * 60 * 1000).toISOString(),
     isEscalated: false,
     qrCodeValue: "BEDS-C302_AISHA",
-    scanStatus: "PENDING_SCAN"
+    scanStatus: "PENDING_SCAN",
+    existingUlcers: ["الورك الأيسر"]
   }
 ];
 

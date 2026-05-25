@@ -1,23 +1,20 @@
-// sw.js - Service Worker for Background Push Notifications
 self.addEventListener('push', function(event) {
   let data = {};
   if (event.data) {
     try {
       data = event.data.json();
-    } catch (e) {
-      data = { body: event.data.text() };
+    } catch(e) {
+      data = { title: "تنبيه", body: event.data.text() };
     }
   }
 
-  const title = data.title || 'تنبيه طبي عاجل';
+  const title = data.title || "إشعار من النظام";
   const options = {
-    body: data.body || 'يوجد إعلان جديد أو تذكير بموعد التقليب',
-    icon: '/favicon.ico',
-    badge: '/favicon.ico',
-    vibrate: [200, 100, 200, 100, 200, 100, 200],
-    data: {
-      url: data.url || '/'
-    }
+    body: data.body || "لديك إشعار جديد",
+    icon: "/vite.svg", // Replace with app icon if available
+    badge: "/vite.svg",
+    requireInteraction: true,
+    vibrate: [200, 100, 200, 100, 200, 100, 200]
   };
 
   event.waitUntil(
@@ -28,6 +25,19 @@ self.addEventListener('push', function(event) {
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
   event.waitUntil(
-    clients.openWindow(event.notification.data.url || '/')
+    clients.matchAll({ type: 'window' }).then(windowClients => {
+      // Check if there is already a window/tab open with the target URL
+      for (let i = 0; i < windowClients.length; i++) {
+        const client = windowClients[i];
+        // If so, just focus it.
+        if (client.url.includes('/') && 'focus' in client) {
+          return client.focus();
+        }
+      }
+      // If not, then open the target URL in a new window/tab.
+      if (clients.openWindow) {
+        return clients.openWindow('/');
+      }
+    })
   );
 });
